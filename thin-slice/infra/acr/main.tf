@@ -38,7 +38,7 @@ variable "instance" {
 
 variable "app_version" {
   type        = string
-  default     = "v1"
+  default     = "v2"
   description = "Tag applied to all images when pushed to ACR"
 }
 
@@ -47,7 +47,7 @@ variable "app_version" {
 
 variable "frontend_local_image" {
   type        = string
-  default     = "poc-frontend"
+  default     = "frontend"
   description = "Local Docker image name for the frontend (poc_frontend_ils repo)"
 }
 
@@ -112,21 +112,7 @@ resource "azurerm_container_registry" "acr" {
   resource_group_name = azurerm_resource_group.acr.name
   location            = azurerm_resource_group.acr.location
   sku                 = "Basic"
-  admin_enabled       = true
-}
-
-# --- User-Assigned Managed Identity for Container Apps ---
-resource "azurerm_user_assigned_identity" "container_app_identity" {
-  name                = module.naming.user_assigned_identity.name
-  resource_group_name = azurerm_resource_group.acr.name
-  location            = azurerm_resource_group.acr.location
-}
-
-# --- Role Assignment: UAMI -> AcrPull on ACR ---
-resource "azurerm_role_assignment" "uami_acr_pull" {
-  scope                = azurerm_container_registry.acr.id
-  role_definition_name = "AcrPull"
-  principal_id         = azurerm_user_assigned_identity.container_app_identity.principal_id
+  admin_enabled       = false
 }
 
 # --- Push Docker images to ACR ---
@@ -152,8 +138,8 @@ resource "null_resource" "push_images" {
       docker logout ${azurerm_container_registry.acr.login_server} 2>/dev/null || true
       az acr login --name ${azurerm_container_registry.acr.name} --resource-group ${azurerm_resource_group.acr.name}
 
-      docker tag ${var.frontend_local_image}:${var.frontend_local_tag} ${azurerm_container_registry.acr.login_server}/poc-frontend:${var.app_version}
-      docker push ${azurerm_container_registry.acr.login_server}/poc-frontend:${var.app_version}
+      docker tag ${var.frontend_local_image}:${var.frontend_local_tag} ${azurerm_container_registry.acr.login_server}/frontend:${var.app_version}
+      docker push ${azurerm_container_registry.acr.login_server}/frontend:${var.app_version}
 
       docker tag ${var.audit_service_local_image}:${var.audit_service_local_tag} ${azurerm_container_registry.acr.login_server}/audit-service:${var.app_version}
       docker push ${azurerm_container_registry.acr.login_server}/audit-service:${var.app_version}
@@ -170,15 +156,6 @@ resource "null_resource" "push_images" {
 }
 
 # --- Outputs ---
-output "uami_id" {
-  value       = azurerm_user_assigned_identity.container_app_identity.id
-  description = "UAMI resource ID — reference this in container app identity blocks in main infra."
-}
-
-output "uami_principal_id" {
-  value       = azurerm_user_assigned_identity.container_app_identity.principal_id
-  description = "UAMI principal ID."
-}
 
 output "acr_login_server" {
   value       = azurerm_container_registry.acr.login_server
@@ -195,14 +172,3 @@ output "acr_id" {
   description = "ACR resource ID"
 }
 
-output "acr_admin_username" {
-  value       = azurerm_container_registry.acr.admin_username
-  description = "ACR admin username (used by Web App for docker registry auth)"
-  sensitive   = true
-}
-
-output "acr_admin_password" {
-  value       = azurerm_container_registry.acr.admin_password
-  description = "ACR admin password (used by Web App for docker registry auth)"
-  sensitive   = true
-}
