@@ -59,7 +59,7 @@ variable "postgresql_admin_password" {
 
 variable "app_version" {
   type        = string
-  default     = "v2"
+  default     = "v1"
   description = "The image tag used for all Docker containers"
 }
 
@@ -358,7 +358,7 @@ resource "azurerm_container_app" "cell_service" {
 
       env {
         name  = "FundingService__BaseUrl"
-        value = "https://${azurerm_container_app.funding_service.ingress[0].fqdn}"
+        value = "https://${module.naming.container_app.name}-funding.${azurerm_container_app_environment.cae.default_domain}"
       }
 
       env {
@@ -398,7 +398,7 @@ resource "azurerm_container_app" "cell_service" {
 
   ingress {
     allow_insecure_connections = true
-    external_enabled           = false
+    external_enabled           = true
     target_port                = 8080
     traffic_weight {
       percentage      = 100
@@ -425,6 +425,15 @@ resource "azurerm_container_app" "funding_service" {
     identity = azurerm_user_assigned_identity.container_app_identity.id
   }
 
+  secret {
+    name  = "db-connection-string"
+    value = "Host=${azurerm_postgresql_flexible_server.funding.fqdn};Port=5432;Database=${azurerm_postgresql_flexible_server_database.funding.name};Username=${var.postgresql_admin_username};Password=${var.postgresql_admin_password};"
+  }
+  secret {
+    name  = "servicebus-connection-string"
+    value = azurerm_servicebus_namespace.main.default_primary_connection_string
+  }
+
   template {
     container {
       name   = "funding-service"
@@ -432,12 +441,35 @@ resource "azurerm_container_app" "funding_service" {
       cpu    = 0.25
       memory = "0.5Gi"
       env {
-        name  = "SQL_SERVER"
-        value = azurerm_postgresql_flexible_server.funding.fqdn
+        name  = "CellService__BaseUrl"
+        value = "https://${module.naming.container_app.name}-cell.${azurerm_container_app_environment.cae.default_domain}"
+      }
+
+      env {
+        name  = "AuditService__BaseUrl"
+        value = "https://${azurerm_container_app.audit_service.ingress[0].fqdn}"
       }
       env {
-        name  = "SQL_DATABASE"
-        value = azurerm_postgresql_flexible_server_database.funding.name
+        name  = "Messaging__BrokerType"
+        value = "AzureServiceBus"
+      }
+      env {
+        name        = "ServiceBus__ConnectionString"
+        secret_name = "servicebus-connection-string"
+      }
+
+      env {
+        name        = "ConnectionStrings__FundingDatabase"
+        secret_name = "db-connection-string"
+      }
+       env {
+        name  = "ServiceBus__TopicName"
+        value = azurerm_servicebus_topic.demo_events.name
+      }
+
+      env {
+        name  = "Cors__AllowedOrigins__0"
+        value = "*"
       }
     }
 
@@ -447,7 +479,7 @@ resource "azurerm_container_app" "funding_service" {
 
   ingress {
     allow_insecure_connections = true
-    external_enabled           = false
+    external_enabled           = true
     target_port                = 8081
     traffic_weight {
       percentage      = 100
@@ -474,6 +506,15 @@ resource "azurerm_container_app" "audit_service" {
     identity = azurerm_user_assigned_identity.container_app_identity.id
   }
 
+  secret {
+    name  = "db-connection-string"
+    value = "Host=${azurerm_postgresql_flexible_server.audit.fqdn};Port=5432;Database=${azurerm_postgresql_flexible_server_database.audit.name};Username=${var.postgresql_admin_username};Password=${var.postgresql_admin_password};"
+  }
+  secret {
+    name  = "servicebus-connection-string"
+    value = azurerm_servicebus_namespace.main.default_primary_connection_string
+  }
+
   template {
     container {
       name   = "audit-service"
@@ -481,12 +522,28 @@ resource "azurerm_container_app" "audit_service" {
       cpu    = 0.25
       memory = "0.5Gi"
       env {
-        name  = "SQL_SERVER"
-        value = azurerm_postgresql_flexible_server.audit.fqdn
+        name  = "ASPNETCORE_ENVIRONMENT"
+        value = "Development"
       }
       env {
-        name  = "SQL_DATABASE"
-        value = azurerm_postgresql_flexible_server_database.audit.name
+        name  = "Messaging__BrokerType"
+        value = "AzureServiceBus"
+      }
+      env {
+        name        = "ServiceBus__ConnectionString"
+        secret_name = "servicebus-connection-string"
+      }
+      env {
+        name        = "ConnectionStrings__DefaultConnection"
+        secret_name = "db-connection-string"
+      }
+      env {
+        name  = "ServiceBus__TopicName"
+        value = azurerm_servicebus_topic.demo_events.name
+      }
+      env {
+        name  = "ServiceBus__SubscriptionName"
+        value = azurerm_servicebus_subscription.demo_processor.name
       }
     }
 
@@ -496,7 +553,7 @@ resource "azurerm_container_app" "audit_service" {
 
   ingress {
     allow_insecure_connections = true
-    external_enabled           = false
+    external_enabled           = true
     target_port                = 8082
     traffic_weight {
       percentage      = 100
@@ -640,9 +697,13 @@ resource "azurerm_linux_web_app" "frontend" {
     "WEBSITES_ENABLE_APP_SERVICE_STORAGE" = "false"
     "WEBSITES_PORT"                       = "80"
     "REGION_NAME"                         = azurerm_resource_group.main.location
-    "VITE_CELL_SERVICE_URL"               = "https://${azurerm_container_app.cell_service.ingress[0].fqdn}"
-    "VITE_FUNDING_SERVICE_URL"            = "https://${azurerm_container_app.funding_service.ingress[0].fqdn}"
-    "VITE_AUDIT_SERVICE_URL"              = "https://${azurerm_container_app.audit_service.ingress[0].fqdn}"
+    # These are read at container startup by entrypoint.sh and written into
+    # /usr/share/nginx/html/env-config.js, which the browser loads as a plain
+    # script before the React bundle. No VITE_ prefix — Vite does not process
+    # these; they are pure runtime environment variables for Nginx.
+    "CELL_SERVICE_URL"    = "http://${azurerm_public_ip.apgw.fqdn}/cell"
+    "FUNDING_SERVICE_URL" = "http://${azurerm_public_ip.apgw.fqdn}/funding"
+    "AUDIT_SERVICE_URL"   = "http://${azurerm_public_ip.apgw.fqdn}/audit"
   }
 }
 
@@ -718,9 +779,9 @@ resource "azurerm_api_management_api" "cell_service" {
   revision              = "1"
   display_name          = "Cell Service API"
   path                  = "cell"
-  protocols             = ["https"]
+  protocols             = ["http"]
   subscription_required = false
-  service_url           = "https://${azurerm_container_app.cell_service.ingress[0].fqdn}"
+  service_url           = "http://${azurerm_container_app.cell_service.ingress[0].fqdn}"
 }
 
 resource "azurerm_api_management_api_operation" "get_all_cells" {
@@ -774,7 +835,12 @@ resource "azurerm_api_management_api_operation" "reset_demo_data" {
   resource_group_name = azurerm_resource_group.main.name
   display_name        = "Reset Demo Data"
   method              = "DELETE"
-  url_template        = "/api/demo/reset"
+  url_template        = "/api/demo/reset/{cellId}"
+  template_parameter {
+    name     = "cellId"
+    required = true
+    type     = "string"
+  }
   response {
     status_code = 200
   }
@@ -808,9 +874,9 @@ resource "azurerm_api_management_api" "funding_service" {
   revision              = "1"
   display_name          = "Funding Service API"
   path                  = "funding"
-  protocols             = ["https"]
+  protocols             = ["http"]
   subscription_required = false
-  service_url           = "https://${azurerm_container_app.funding_service.ingress[0].fqdn}"
+  service_url           = "http://${azurerm_container_app.funding_service.ingress[0].fqdn}"
 }
 
 resource "azurerm_api_management_api_operation" "get_funding_status" {
@@ -844,6 +910,19 @@ resource "azurerm_api_management_api_operation" "upload_actual_cashflows" {
   }
 }
 
+resource "azurerm_api_management_api_operation" "create_expected_cashflow" {
+  operation_id        = "create-expected-cashflow"
+  api_name            = azurerm_api_management_api.funding_service.name
+  api_management_name = azurerm_api_management.apim.name
+  resource_group_name = azurerm_resource_group.main.name
+  display_name        = "Create Expected Cashflow"
+  method              = "POST"
+  url_template        = "/api/v1/funding/expected-cashflows"
+  response {
+    status_code = 201
+  }
+}
+
 resource "azurerm_api_management_api_policy" "funding_service" {
   api_name            = azurerm_api_management_api.funding_service.name
   api_management_name = azurerm_api_management.apim.name
@@ -872,9 +951,9 @@ resource "azurerm_api_management_api" "audit_service" {
   revision              = "1"
   display_name          = "Audit Service API"
   path                  = "audit"
-  protocols             = ["https"]
+  protocols             = ["http"]
   subscription_required = false
-  service_url           = "https://${azurerm_container_app.audit_service.ingress[0].fqdn}"
+  service_url           = "http://${azurerm_container_app.audit_service.ingress[0].fqdn}"
 }
 
 resource "azurerm_api_management_api_operation" "get_audit_events" {
@@ -884,9 +963,9 @@ resource "azurerm_api_management_api_operation" "get_audit_events" {
   resource_group_name = azurerm_resource_group.main.name
   display_name        = "Get Audit Events"
   method              = "GET"
-  url_template        = "/api/v1/audit/events/Cell/{cellId}"
+  url_template        = "/api/v1/audit/events/{entityId}"
   template_parameter {
-    name     = "cellId"
+    name     = "entityId"
     required = true
     type     = "string"
   }
@@ -985,6 +1064,12 @@ resource "azurerm_application_gateway" "res-0" {
     ip_addresses = []
   }
 
+  backend_address_pool {
+    name         = "backend-pool-apim-${var.instance}"
+    fqdns        = ["${azurerm_api_management.apim.name}.azure-api.net"]
+    ip_addresses = []
+  }
+
   ssl_policy {
     policy_type = "Predefined"
     policy_name = "AppGwSslPolicy20220101"
@@ -1007,12 +1092,39 @@ resource "azurerm_application_gateway" "res-0" {
     }
   }
 
+  # APIM returns 404 for unknown paths — accept 200-404 so the gateway is
+  # considered healthy even though /status isn't a registered API path.
+  probe {
+    interval                                  = 30
+    minimum_servers                           = 0
+    name                                      = "healthprobe-apim-${var.instance}"
+    path                                      = "/status"
+    pick_host_name_from_backend_http_settings = true
+    protocol                                  = "Http"
+    timeout                                   = 20
+    unhealthy_threshold                       = 3
+    match {
+      status_code = ["200-404"]
+    }
+  }
+
   backend_http_settings {
     cookie_based_affinity               = "Disabled"
     name                                = "backend-settings-${var.instance}"
     pick_host_name_from_backend_address = true
     port                                = 80
     probe_name                          = "healthprobe${var.instance}"
+    protocol                            = "Http"
+    request_timeout                     = 120
+    trusted_root_certificate_names      = []
+  }
+
+  backend_http_settings {
+    cookie_based_affinity               = "Disabled"
+    name                                = "backend-settings-apim-${var.instance}"
+    pick_host_name_from_backend_address = true
+    port                                = 80
+    probe_name                          = "healthprobe-apim-${var.instance}"
     protocol                            = "Http"
     request_timeout                     = 120
     trusted_root_certificate_names      = []
@@ -1039,13 +1151,38 @@ resource "azurerm_application_gateway" "res-0" {
     protocol                       = "Http"
     require_sni                    = false
   }
+  url_path_map {
+    name                               = "api-path-map"
+    default_backend_address_pool_name  = "backend-pool-frontend-${var.instance}"
+    default_backend_http_settings_name = "backend-settings-${var.instance}"
+
+    path_rule {
+      name                       = "cell-api-rule"
+      paths                      = ["/cell/*"]
+      backend_address_pool_name  = "backend-pool-apim-${var.instance}"
+      backend_http_settings_name = "backend-settings-apim-${var.instance}"
+    }
+
+    path_rule {
+      name                       = "funding-api-rule"
+      paths                      = ["/funding/*"]
+      backend_address_pool_name  = "backend-pool-apim-${var.instance}"
+      backend_http_settings_name = "backend-settings-apim-${var.instance}"
+    }
+
+    path_rule {
+      name                       = "audit-api-rule"
+      paths                      = ["/audit/*"]
+      backend_address_pool_name  = "backend-pool-apim-${var.instance}"
+      backend_http_settings_name = "backend-settings-apim-${var.instance}"
+    }
+  }
   request_routing_rule {
-    backend_address_pool_name  = "backend-pool-frontend-${var.instance}"
-    backend_http_settings_name = "backend-settings-${var.instance}"
-    http_listener_name         = "Listener${var.instance}"
-    name                       = "Rule${var.instance}"
-    priority                   = 1
-    rule_type                  = "Basic"
+    http_listener_name = "Listener${var.instance}"
+    name               = "Rule${var.instance}"
+    priority           = 1
+    rule_type          = "PathBasedRouting"
+    url_path_map_name  = "api-path-map"
   }
   sku {
     capacity = 1
@@ -1290,17 +1427,17 @@ output "apim_name" {
 }
 
 output "cell_service_url" {
-  value       = "https://${azurerm_container_app.cell_service.ingress[0].fqdn}"
+  value       = "http://${azurerm_container_app.cell_service.ingress[0].fqdn}"
   description = "Cell Service internal URL (resolves within the VNet via private DNS)."
 }
 
 output "funding_service_url" {
-  value       = "https://${azurerm_container_app.funding_service.ingress[0].fqdn}"
+  value       = "http://${azurerm_container_app.funding_service.ingress[0].fqdn}"
   description = "Funding Service internal URL (resolves within the VNet via private DNS)."
 }
 
 output "audit_service_url" {
-  value       = "https://${azurerm_container_app.audit_service.ingress[0].fqdn}"
+  value       = "http://${azurerm_container_app.audit_service.ingress[0].fqdn}"
   description = "Audit Service internal URL (resolves within the VNet via private DNS)."
 }
 

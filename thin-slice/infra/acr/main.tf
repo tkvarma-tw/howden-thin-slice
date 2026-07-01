@@ -38,7 +38,7 @@ variable "instance" {
 
 variable "app_version" {
   type        = string
-  default     = "v2"
+  default     = "v1"
   description = "Tag applied to all images when pushed to ACR"
 }
 
