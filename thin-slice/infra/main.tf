@@ -65,6 +65,26 @@ variable "app_version" {
 
 data "azurerm_client_config" "current" {}
 
+# --- Parse per-service .env files into maps (static, non-secret vars only) ---
+locals {
+  _parse_env = {
+    cell    = file("${path.module}/envs/cell.env")
+    funding = file("${path.module}/envs/funding.env")
+    audit   = file("${path.module}/envs/audit.env")
+  }
+  env_vars = {
+    for svc, content in local._parse_env :
+    svc => {
+      for line in [
+        for l in split("\n", content) : trimspace(l)
+        if length(trimspace(l)) > 0 && !startswith(trimspace(l), "#")
+      ] :
+      element(split("=", line), 0) => join("=", slice(split("=", line), 1, length(split("=", line))))
+      if length(split("=", line)) >= 2
+    }
+  }
+}
+
 
 # --- Official Azure Naming Module ---
 module "naming" {
@@ -324,15 +344,16 @@ resource "azurerm_container_app" "cell_service" {
     identity = azurerm_user_assigned_identity.container_app_identity.id
   }
 
-  # Sensitive values stored as Container App secrets
   secret {
-    name  = "db-connection-string"
-    value = "Host=${azurerm_postgresql_flexible_server.cell.fqdn};Port=5432;Database=${azurerm_postgresql_flexible_server_database.cell.name};Username=${var.postgresql_admin_username};Password=${var.postgresql_admin_password};"
+    name                = "db-connection-string"
+    key_vault_secret_id = azurerm_key_vault_secret.cell_db_connection_string.id
+    identity            = azurerm_user_assigned_identity.container_app_identity.id
   }
 
   secret {
-    name  = "servicebus-connection-string"
-    value = azurerm_servicebus_namespace.main.default_primary_connection_string
+    name                = "servicebus-connection-string"
+    key_vault_secret_id = azurerm_key_vault_secret.servicebus_connection_string.id
+    identity            = azurerm_user_assigned_identity.container_app_identity.id
   }
 
   template {
@@ -341,9 +362,12 @@ resource "azurerm_container_app" "cell_service" {
       image  = "${var.acr_name}/cell-service:${var.app_version}"
       cpu    = 0.25
       memory = "0.5Gi"
-      env {
-        name  = "ASPNETCORE_ENVIRONMENT"
-        value = "Development"
+      dynamic "env" {
+        for_each = local.env_vars["cell"]
+        content {
+          name  = env.key
+          value = env.value
+        }
       }
 
       env {
@@ -367,11 +391,6 @@ resource "azurerm_container_app" "cell_service" {
       }
 
       env {
-        name  = "Messaging__BrokerType"
-        value = "AzureServiceBus"
-      }
-
-      env {
         name        = "ServiceBus__ConnectionString"
         secret_name = "servicebus-connection-string"
       }
@@ -379,16 +398,6 @@ resource "azurerm_container_app" "cell_service" {
       env {
         name  = "ServiceBus__TopicName"
         value = azurerm_servicebus_topic.demo_events.name
-      }
-
-      env {
-        name  = "Cors__Policy"
-        value = "AllowAll"
-      }
-
-      env {
-        name  = "Cors__AllowedOrigins__0"
-        value = "*"
       }
     }
 
@@ -426,12 +435,15 @@ resource "azurerm_container_app" "funding_service" {
   }
 
   secret {
-    name  = "db-connection-string"
-    value = "Host=${azurerm_postgresql_flexible_server.funding.fqdn};Port=5432;Database=${azurerm_postgresql_flexible_server_database.funding.name};Username=${var.postgresql_admin_username};Password=${var.postgresql_admin_password};"
+    name                = "db-connection-string"
+    key_vault_secret_id = azurerm_key_vault_secret.funding_db_connection_string.id
+    identity            = azurerm_user_assigned_identity.container_app_identity.id
   }
+
   secret {
-    name  = "servicebus-connection-string"
-    value = azurerm_servicebus_namespace.main.default_primary_connection_string
+    name                = "servicebus-connection-string"
+    key_vault_secret_id = azurerm_key_vault_secret.servicebus_connection_string.id
+    identity            = azurerm_user_assigned_identity.container_app_identity.id
   }
 
   template {
@@ -440,6 +452,14 @@ resource "azurerm_container_app" "funding_service" {
       image  = "${var.acr_name}/funding-service:${var.app_version}"
       cpu    = 0.25
       memory = "0.5Gi"
+      dynamic "env" {
+        for_each = local.env_vars["funding"]
+        content {
+          name  = env.key
+          value = env.value
+        }
+      }
+
       env {
         name  = "CellService__BaseUrl"
         value = "https://${module.naming.container_app.name}-cell.${azurerm_container_app_environment.cae.default_domain}"
@@ -449,10 +469,7 @@ resource "azurerm_container_app" "funding_service" {
         name  = "AuditService__BaseUrl"
         value = "https://${azurerm_container_app.audit_service.ingress[0].fqdn}"
       }
-      env {
-        name  = "Messaging__BrokerType"
-        value = "AzureServiceBus"
-      }
+
       env {
         name        = "ServiceBus__ConnectionString"
         secret_name = "servicebus-connection-string"
@@ -462,14 +479,10 @@ resource "azurerm_container_app" "funding_service" {
         name        = "ConnectionStrings__FundingDatabase"
         secret_name = "db-connection-string"
       }
-       env {
-        name  = "ServiceBus__TopicName"
-        value = azurerm_servicebus_topic.demo_events.name
-      }
 
       env {
-        name  = "Cors__AllowedOrigins__0"
-        value = "*"
+        name  = "ServiceBus__TopicName"
+        value = azurerm_servicebus_topic.demo_events.name
       }
     }
 
@@ -507,12 +520,15 @@ resource "azurerm_container_app" "audit_service" {
   }
 
   secret {
-    name  = "db-connection-string"
-    value = "Host=${azurerm_postgresql_flexible_server.audit.fqdn};Port=5432;Database=${azurerm_postgresql_flexible_server_database.audit.name};Username=${var.postgresql_admin_username};Password=${var.postgresql_admin_password};"
+    name                = "db-connection-string"
+    key_vault_secret_id = azurerm_key_vault_secret.audit_db_connection_string.id
+    identity            = azurerm_user_assigned_identity.container_app_identity.id
   }
+
   secret {
-    name  = "servicebus-connection-string"
-    value = azurerm_servicebus_namespace.main.default_primary_connection_string
+    name                = "servicebus-connection-string"
+    key_vault_secret_id = azurerm_key_vault_secret.servicebus_connection_string.id
+    identity            = azurerm_user_assigned_identity.container_app_identity.id
   }
 
   template {
@@ -521,26 +537,29 @@ resource "azurerm_container_app" "audit_service" {
       image  = "${var.acr_name}/audit-service:${var.app_version}"
       cpu    = 0.25
       memory = "0.5Gi"
-      env {
-        name  = "ASPNETCORE_ENVIRONMENT"
-        value = "Development"
+      dynamic "env" {
+        for_each = local.env_vars["audit"]
+        content {
+          name  = env.key
+          value = env.value
+        }
       }
-      env {
-        name  = "Messaging__BrokerType"
-        value = "AzureServiceBus"
-      }
+
       env {
         name        = "ServiceBus__ConnectionString"
         secret_name = "servicebus-connection-string"
       }
+
       env {
         name        = "ConnectionStrings__DefaultConnection"
         secret_name = "db-connection-string"
       }
+
       env {
         name  = "ServiceBus__TopicName"
         value = azurerm_servicebus_topic.demo_events.name
       }
+
       env {
         name  = "ServiceBus__SubscriptionName"
         value = azurerm_servicebus_subscription.demo_processor.name
@@ -1399,6 +1418,97 @@ resource "azurerm_private_dns_a_record" "postgresql_audit" {
   resource_group_name = azurerm_resource_group.main.name
   ttl                 = 300
   records             = [azurerm_private_endpoint.postgresql_audit.private_service_connection[0].private_ip_address]
+}
+
+# --- Key Vault ---
+resource "azurerm_key_vault" "main" {
+  name                          = module.naming.key_vault.name
+  location                      = azurerm_resource_group.main.location
+  resource_group_name           = azurerm_resource_group.main.name
+  tenant_id                     = data.azurerm_client_config.current.tenant_id
+  sku_name                      = "standard"
+  rbac_authorization_enabled    = true
+  purge_protection_enabled      = false
+  soft_delete_retention_days    = 7
+  public_network_access_enabled = true
+}
+
+resource "azurerm_private_endpoint" "keyvault" {
+  name                = "${module.naming.private_endpoint.name}-kv"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  subnet_id           = azurerm_subnet.snet_private_endpoint.id
+
+  private_service_connection {
+    name                           = "${module.naming.private_service_connection.name}-kv"
+    private_connection_resource_id = azurerm_key_vault.main.id
+    subresource_names              = ["vault"]
+    is_manual_connection           = false
+  }
+}
+
+resource "azurerm_private_dns_zone" "keyvault" {
+  name                = "privatelink.vaultcore.azure.net"
+  resource_group_name = azurerm_resource_group.main.name
+}
+
+resource "azurerm_private_dns_zone_virtual_network_link" "keyvault_vnet_link" {
+  name                  = "keyvault-vnet-link"
+  resource_group_name   = azurerm_resource_group.main.name
+  private_dns_zone_name = azurerm_private_dns_zone.keyvault.name
+  virtual_network_id    = azurerm_virtual_network.vnet.id
+  registration_enabled  = false
+}
+
+resource "azurerm_private_dns_a_record" "keyvault" {
+  name                = azurerm_key_vault.main.name
+  zone_name           = azurerm_private_dns_zone.keyvault.name
+  resource_group_name = azurerm_resource_group.main.name
+  ttl                 = 300
+  records             = [azurerm_private_endpoint.keyvault.private_service_connection[0].private_ip_address]
+}
+
+# Terraform deployer can write secrets during `apply`
+resource "azurerm_role_assignment" "terraform_kv_secrets_officer" {
+  scope                = azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+
+# UAMI used by all Container Apps can read secrets at runtime
+resource "azurerm_role_assignment" "uami_kv_secrets_user" {
+  scope                = azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets User"
+  principal_id         = azurerm_user_assigned_identity.container_app_identity.principal_id
+}
+
+# --- Key Vault Secrets ---
+resource "azurerm_key_vault_secret" "cell_db_connection_string" {
+  name         = "cell-db-connection-string"
+  value        = "Host=${azurerm_postgresql_flexible_server.cell.fqdn};Port=5432;Database=${azurerm_postgresql_flexible_server_database.cell.name};Username=${var.postgresql_admin_username};Password=${var.postgresql_admin_password};"
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [azurerm_role_assignment.terraform_kv_secrets_officer]
+}
+
+resource "azurerm_key_vault_secret" "funding_db_connection_string" {
+  name         = "funding-db-connection-string"
+  value        = "Host=${azurerm_postgresql_flexible_server.funding.fqdn};Port=5432;Database=${azurerm_postgresql_flexible_server_database.funding.name};Username=${var.postgresql_admin_username};Password=${var.postgresql_admin_password};"
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [azurerm_role_assignment.terraform_kv_secrets_officer]
+}
+
+resource "azurerm_key_vault_secret" "audit_db_connection_string" {
+  name         = "audit-db-connection-string"
+  value        = "Host=${azurerm_postgresql_flexible_server.audit.fqdn};Port=5432;Database=${azurerm_postgresql_flexible_server_database.audit.name};Username=${var.postgresql_admin_username};Password=${var.postgresql_admin_password};"
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [azurerm_role_assignment.terraform_kv_secrets_officer]
+}
+
+resource "azurerm_key_vault_secret" "servicebus_connection_string" {
+  name         = "servicebus-connection-string"
+  value        = azurerm_servicebus_namespace.main.default_primary_connection_string
+  key_vault_id = azurerm_key_vault.main.id
+  depends_on   = [azurerm_role_assignment.terraform_kv_secrets_officer]
 }
 
 # --- Outputs ---

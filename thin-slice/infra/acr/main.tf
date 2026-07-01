@@ -38,7 +38,7 @@ variable "instance" {
 
 variable "app_version" {
   type        = string
-  default     = "v1"
+  default     = "v2"
   description = "Tag applied to all images when pushed to ACR"
 }
 
@@ -115,21 +115,12 @@ resource "azurerm_container_registry" "acr" {
   admin_enabled       = false
 }
 
-# --- Push Docker images to ACR ---
-# Single login via the current Azure CLI session followed by sequential pushes.
-# Re-runs automatically when app_version or any local image name/tag changes.
-resource "null_resource" "push_images" {
+# --- Push Docker images to ACR (parallel) ---
+# Login once, then Terraform runs each image push concurrently as independent resources.
+
+resource "null_resource" "acr_login" {
   triggers = {
-    version_tag           = var.app_version
-    acr_server            = azurerm_container_registry.acr.login_server
-    frontend_image        = var.frontend_local_image
-    frontend_tag          = var.frontend_local_tag
-    audit_service_image   = var.audit_service_local_image
-    audit_service_tag     = var.audit_service_local_tag
-    funding_service_image = var.funding_service_local_image
-    funding_service_tag   = var.funding_service_local_tag
-    cell_service_image    = var.cell_service_local_image
-    cell_service_tag      = var.cell_service_local_tag
+    acr_server = azurerm_container_registry.acr.login_server
   }
 
   provisioner "local-exec" {
@@ -137,22 +128,86 @@ resource "null_resource" "push_images" {
       set -e
       docker logout ${azurerm_container_registry.acr.login_server} 2>/dev/null || true
       az acr login --name ${azurerm_container_registry.acr.name} --resource-group ${azurerm_resource_group.acr.name}
+    EOT
+  }
 
+  depends_on = [azurerm_container_registry.acr]
+}
+
+resource "null_resource" "push_frontend" {
+  triggers = {
+    version_tag    = var.app_version
+    acr_server     = azurerm_container_registry.acr.login_server
+    local_image    = var.frontend_local_image
+    local_tag      = var.frontend_local_tag
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
       docker tag ${var.frontend_local_image}:${var.frontend_local_tag} ${azurerm_container_registry.acr.login_server}/frontend:${var.app_version}
       docker push ${azurerm_container_registry.acr.login_server}/frontend:${var.app_version}
+    EOT
+  }
 
+  depends_on = [null_resource.acr_login]
+}
+
+resource "null_resource" "push_audit_service" {
+  triggers = {
+    version_tag    = var.app_version
+    acr_server     = azurerm_container_registry.acr.login_server
+    local_image    = var.audit_service_local_image
+    local_tag      = var.audit_service_local_tag
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
       docker tag ${var.audit_service_local_image}:${var.audit_service_local_tag} ${azurerm_container_registry.acr.login_server}/audit-service:${var.app_version}
       docker push ${azurerm_container_registry.acr.login_server}/audit-service:${var.app_version}
+    EOT
+  }
 
+  depends_on = [null_resource.acr_login]
+}
+
+resource "null_resource" "push_funding_service" {
+  triggers = {
+    version_tag    = var.app_version
+    acr_server     = azurerm_container_registry.acr.login_server
+    local_image    = var.funding_service_local_image
+    local_tag      = var.funding_service_local_tag
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
       docker tag ${var.funding_service_local_image}:${var.funding_service_local_tag} ${azurerm_container_registry.acr.login_server}/funding-service:${var.app_version}
       docker push ${azurerm_container_registry.acr.login_server}/funding-service:${var.app_version}
+    EOT
+  }
 
+  depends_on = [null_resource.acr_login]
+}
+
+resource "null_resource" "push_cell_service" {
+  triggers = {
+    version_tag    = var.app_version
+    acr_server     = azurerm_container_registry.acr.login_server
+    local_image    = var.cell_service_local_image
+    local_tag      = var.cell_service_local_tag
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set -e
       docker tag ${var.cell_service_local_image}:${var.cell_service_local_tag} ${azurerm_container_registry.acr.login_server}/cell-service:${var.app_version}
       docker push ${azurerm_container_registry.acr.login_server}/cell-service:${var.app_version}
     EOT
   }
 
-  depends_on = [azurerm_container_registry.acr]
+  depends_on = [null_resource.acr_login]
 }
 
 # --- Outputs ---
